@@ -1,0 +1,637 @@
+diff --git a/.env.database.example b/.env.database.example
+index 8a3947a..af6171d 100644
+--- a/.env.database.example
++++ b/.env.database.example
+@@ -20,3 +20,8 @@ PORTAL_SESSION_SECRET=GENERATE_A_RANDOM_SERVER_SECRET
+ # REVIEWED_PLAN_SHA256=
+ # VERIFIED_BACKUP_PATH=/private/backup/postgres.dump
+ # VERIFIED_BACKUP_SHA256=
++
++# Optional isolated preview only; never use against production customer identities.
++APP_ENV=production
++SUPABASE_PREVIEW_TEST_OTPS=
++PREVIEW_OTP_VALID_UNTIL=
+diff --git a/README.md b/README.md
+index 2241000..f2c00c4 100644
+--- a/README.md
++++ b/README.md
+@@ -1,11 +1,10 @@
+-<div align="center">
++# Sanat Pish / Atlas Forza
+ 
+-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
++Unified React frontend and Express backend, with PostgreSQL / self-hosted Supabase support.
+ 
+-  <h1>Built with AI Studio</h2>
++- Frontend: `src/`
++- Backend: `server.ts`, `api/`, `server/db/`
++- Build and start: `npm ci --include=dev`, `npm run build`, `NODE_ENV=production npm start`
++- Database and preview setup: [deployment notes](docs/deployment/unified-source.md)
+ 
+-  <p>The fastest path from prompt to production with Gemini.</p>
+-
+-  <a href="https://aistudio.google.com/apps">Start building</a>
+-
+-</div>
++Copy `.env.example` and the required database variables from `.env.database.example` into an ignored local environment file. Never commit actual keys or customer data. Database access and live signup require deployment configuration and a reachable self-hosted Supabase installation.
+diff --git a/docs/deployment/unified-source.md b/docs/deployment/unified-source.md
+new file mode 100644
+index 0000000..9c15973
+--- /dev/null
++++ b/docs/deployment/unified-source.md
+@@ -0,0 +1,40 @@
++# Unified source and self-hosted database
++
++Canonical repository: javanwebi/atlasforza. Frontend: src/. Express backend: server.ts, api/, server/db/. Both ship in the root Dockerfile. This import includes the previous auth validation and left-image/right-form fixes from source commit 4a915c547d4ce9fb60928adbe25e4601e0a17c40. Server-only Nginx and Docker configuration changes are not a substitute for an audited server export.
++
++## Database
++
++Set DATA_BACKEND=postgres and DATABASE_SCHEMA=adopted. DATABASE_URL must identify the owner's self-hosted PostgreSQL; SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY must identify Auth from the SAME installation. Keep credentials outside Git. A remote preview cannot use localhost to reach the owner's server. Use a controlled private connection or HTTPS gateway for Supabase and an encrypted restricted PostgreSQL route; never expose port 5432 broadly. No cloud Supabase fallback is introduced.
++
++Do not apply historical prototype migrations to the adopted production schema. Preserve existing IDs and data. Live database schema changes still require backup, restore verification and owner approval.
++
++## Browser test codes (preview only)
++
++The app still requests and verifies OTP through Supabase Auth. No code is accepted locally and no browser action grants admin access.
++
++For an isolated DEVELOPMENT database, configure matching test-number mappings in Auth and the app. In the self-hosted Auth container use GOTRUE_SMS_TEST_OTP (digits-only international phone: six digits, comma-separated) and GOTRUE_SMS_TEST_OTP_VALID_UNTIL. Recreate only the Auth service after reviewing its effective Compose configuration. Do not enable automatic phone confirmation.
++
++App environment:
++
++- APP_ENV=preview
++- DATABASE_ENV=development
++- SUPABASE_PREVIEW_TEST_OTPS: exactly the same mapping as Auth
++- PREVIEW_OTP_VALID_UNTIL: explicit future ISO timestamp
++
++Only mapped test numbers receive a visible browser code; other numbers require the real SMS provider. Missing, expired, or production settings never expose a code. Remove the Auth mapping and app mapping before production. This tests the signup flow, not ownership of a real phone. Test accounts must use a separate development database; these settings are not active on the owner's production server.
++
++## AI configuration
++
++Provider keys are backend environment variables: GEMINI_API_KEY, AI_FORZA_API_KEY (legacy alias ai-forza supported). Worker origins: PART_RECOGNITION_WORKER_URL and ATLAS_AI_WORKER_URL. PART_RECOGNITION_WORKER_TOKEN is the recognition worker's access token. Empty recognition origin disables that worker and allows the existing direct-provider path. Worker provider keys belong in the worker's own secret environment. Do not use VITE_* for secrets; do not save keys in database settings or commit .env.
++
++## Remaining live verification
++
++Repository checks do not prove access to the owner's server. Before claiming live completion verify /api/health, anonymous /api/runtime, signup -> Auth -> user_profiles -> chosen credentials -> login, admin role isolation, and database persistence after restart. An existing password cannot be recovered from its hash. Recover the admin username by a narrowly scoped query on the correct installation; set a new password via a secure operator flow if necessary.
++
++Railway work is cancelled at the owner's request; no Railway changes are required by this document.
++
++## Design merge 2026-10-22
++
++Integrated the design delta from atlassanatpish1 commit 32de134f801fd19814e78c82b0383b6edefb4b4d against prior application snapshot d1522f00e2ac9c2fa0ead1767ed5f9480dfd6dec, preserving the auth validation and preview configuration changes. The source main branch was re-rooted, so the merge uses the actual file delta rather than assuming shared Git ancestry. The announcements SQL is included for review, not automatically applied to production.
++
++Legacy operational database reports and archived import automation are omitted from this public source snapshot. Legal registration identifiers in AboutUsPage require owner verification and are displayed as pending confirmation. Secrets and live customer rows are excluded. The live server must be backed up, deployed and checked separately before marking this release live.
+diff --git a/scripts/database/checkSelfHosted.ts b/scripts/database/checkSelfHosted.ts
+new file mode 100644
+index 0000000..102cd94
+--- /dev/null
++++ b/scripts/database/checkSelfHosted.ts
+@@ -0,0 +1,13 @@
++import 'dotenv/config';
++import {database,closeDatabase} from '../../server/db/connection';
++const authUrl=new URL(process.env.SUPABASE_URL || 'http://missing.invalid');
++const dbUrl=new URL(process.env.DATABASE_URL || 'postgresql://missing.invalid');
++if(authUrl.hostname.endsWith('.supabase.co') || dbUrl.hostname.endsWith('.supabase.co'))throw new Error('Expected owner self-hosted Supabase; cloud endpoint detected');
++if(authUrl.hostname==='missing.invalid' || dbUrl.hostname==='missing.invalid')throw new Error('Self-hosted database configuration is incomplete');
++try {
++ const health=await database().query('select 1 as connected');
++ const profiles=await database().query("select username from public.user_profiles where role::text='admin'");
++ const response=await fetch(new URL('/auth/v1/health',authUrl),{signal:AbortSignal.timeout(10000)});
++ console.log(JSON.stringify({database:health.rows[0]?.connected===1,auth:response.ok,adminUsernames:profiles.rows.map(r=>r.username),passwords:'Hashed; cannot retrieve original password'}));
++ if(!response.ok)process.exitCode=1;
++} finally {await closeDatabase();}
+diff --git a/server.ts b/server.ts
+index 352be1d..bf07beb 100644
+--- a/server.ts
++++ b/server.ts
+@@ -159,12 +159,13 @@ function getPartRecognitionWorkerUrl(): string { return recognitionWorkerUrl(pro
+ 
+ // User-provided Cloudflare Worker for AI Forza Call & General AI REST requests
+ const ATLAS_AI_WORKER_URL =
+-  (process.env.ATLAS_AI_WORKER_URL || 'https://atlasai.javanwebio.workers.dev').trim().replace(/\/+$/, '');
++  (process.env.ATLAS_AI_WORKER_URL || '').trim().replace(/\/+$/, '');
+ 
+ export async function callAtlasAiWorkerChat(
+   messages: Array<{ role: string; content: any }>,
+   options: { model?: string; timeoutMs?: number } = {}
+ ): Promise<string> {
++  if (!ATLAS_AI_WORKER_URL) throw new Error('ATLAS_AI_WORKER_URL is not configured');
+   const preferredModel = options.model || 'gemini-3.5-flash-lite';
+   const models = [
+     preferredModel,
+diff --git a/server/db/previewOtp.ts b/server/db/previewOtp.ts
+new file mode 100644
+index 0000000..2855606
+--- /dev/null
++++ b/server/db/previewOtp.ts
+@@ -0,0 +1,14 @@
++/** Only mirrors Supabase Auth's own test-number mapping; never verifies an OTP here. */
++export function previewOtp(phone:string, env:NodeJS.ProcessEnv=process.env):string|undefined {
++ if(env.APP_ENV!=='preview' || env.DATABASE_ENV!=='development')return;
++ const until=Date.parse(env.PREVIEW_OTP_VALID_UNTIL || '');
++ if(!Number.isFinite(until) || until<=Date.now())return;
++ const wanted=phone.replace(/^\+/, '');
++ for(const entry of (env.SUPABASE_PREVIEW_TEST_OTPS || '').split(',')){
++  const [number,code]=entry.trim().split(':');
++  if(number===wanted && /^\d{6}$/.test(code || ''))return code;
++ }
++}
++export function previewOtpResponse(code:string|undefined){
++ return code ? {previewCode:code,message:'محیط آزمایشی: کد را وارد کنید. مالکیت واقعی شماره با این روش تأیید نمی‌شود.'} : {};
++}
+diff --git a/server/db/supabaseAuth.ts b/server/db/supabaseAuth.ts
+index e83d3e3..acc3704 100644
+--- a/server/db/supabaseAuth.ts
++++ b/server/db/supabaseAuth.ts
+@@ -1,3 +1,5 @@
++import {previewOtp,previewOtpResponse} from './previewOtp';
++import {authRegistrationError,normalizeDigits} from "../../src/utils/authValidation";
+ import {createClient,type Session} from '@supabase/supabase-js';
+ import type {IncomingMessage,ServerResponse} from 'node:http';
+ import crypto from 'node:crypto';
+@@ -7,7 +9,7 @@ const error=(status:number,message:string)=>Object.assign(new Error(message),{st
+ function client(){const url=process.env.SUPABASE_URL,key=process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY;if(!url || !key)throw error(503,'اتصال Supabase Auth هنوز کامل نشده است.');return createClient(url,key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});}
+ const cookie=(req:IncomingMessage,name:string)=>(req.headers.cookie || '').split(';').map(value=>value.trim()).find(value=>value.startsWith(name+'='))?.slice(name.length+1);
+ function cookies(req:IncomingMessage,res:ServerResponse,session:Session|null){const secure=process.env.NODE_ENV==='production'?'; Secure':'';const values=[`sp_access=${session?.access_token || ''}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${session?.expires_in || 0}${secure}`,`sp_refresh=${session?.refresh_token || ''}; Path=/api/portal; HttpOnly; SameSite=Lax; Max-Age=${session?2592000:0}${secure}`];res.setHeader('Set-Cookie',values);req.headers.cookie=[...(req.headers.cookie || '').split(';').filter(value=>!/^\s*sp_(access|refresh)=/.test(value)),`sp_access=${session?.access_token || ''}`,`sp_refresh=${session?.refresh_token || ''}`].join(';');}
+-function phone(raw:string){const value=String(raw || '').replace(/[۰-۹]/g,d=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d))).replace(/[\s()-]/g,'').replace(/^(\+98|0098|98)/,'0');if(!/^09\d{9}$/.test(value))throw error(400,'شماره موبایل معتبر وارد کنید.');return {local:value,e164:'+98'+value.slice(1)};}
++function phone(raw:string){const value=normalizeDigits(String(raw || '')).replace(/[\s()-]/g,'').replace(/^(\+98|0098|98)/,'0');if(!/^09\d{9}$/.test(value))throw error(400,'شماره موبایل معتبر وارد کنید.');return {local:value,e164:'+98'+value.slice(1)};}
+ export async function supabaseIdentity(req:IncomingMessage,db:{users:any[]}){
+  const token=cookie(req,'sp_access');if(!token)return {admin:false};
+  const result=await client().auth.getUser(token);if(result.error){if(result.error.status && result.error.status>=500)throw error(503,'بررسی ورود در دسترس نیست.');return {admin:false};}
+@@ -21,8 +23,12 @@ export async function supabaseAuthAction(req:IncomingMessage,res:ServerResponse,
+  const auth=client();
+  if(body.action==='logout'){const access=cookie(req,'sp_access'),refresh=cookie(req,'sp_refresh');if(access && refresh){const sdk=client();await sdk.auth.setSession({access_token:access,refresh_token:refresh});await sdk.auth.signOut({scope:'local'});}cookies(req,res,null);send(200,{success:true});return true;}
+  if(body.action==='register'){
+-  if(process.env.SUPABASE_SMS_READY!=='true')throw error(503,'سرویس پیامک هنوز فعال نشده است؛ ثبت‌نام پس از اتصال سرویس پیامک امکان‌پذیر است.');
+-  const p=body.payload || {},number=phone(p.mobile);
++
++  const p=body.payload || {};
++  const invalid=authRegistrationError(p);if(invalid)throw error(400,invalid);
++  const number=phone(p.mobile);
++  for(const field of ['firstName','lastName','companyName','email'])if(typeof p[field]==='string')p[field]=p[field].trim();
++  if(process.env.SUPABASE_SMS_READY!=='true' && !previewOtp(number.e164))throw error(503,'سرویس پیامک هنوز فعال نشده است؛ ثبت‌نام پس از اتصال سرویس پیامک امکان‌پذیر است.');
+   for(const field of ['firstName','lastName','companyName','provinceId','cityId','activityField'])if(typeof p[field]!=='string' || !p[field].trim() || p[field].length>300)throw error(400,'تمام اطلاعات الزامی را کامل کنید.');
+   const existing=await database().query('select id from public.user_profiles where phone=$1 or phone=$2',[number.local,number.e164]);
+   if(existing.rowCount)throw error(409,'این شماره قبلاً ثبت شده است؛ از بخش ورود استفاده کنید.');
+@@ -32,7 +38,7 @@ export async function supabaseAuthAction(req:IncomingMessage,res:ServerResponse,
+   res.setHeader('Set-Cookie',`sp_registration=${draft.id}; Path=/api/portal; HttpOnly; SameSite=Lax; Max-Age=1800${process.env.NODE_ENV==='production'?'; Secure':''}`);
+   const result=await auth.auth.signInWithOtp({phone:number.e164,options:{shouldCreateUser:true}});
+   if(result.error)throw error(503,'ارسال کد تأیید انجام نشد؛ تنظیمات پیامک Supabase Auth را بررسی کنید.');
+-  send(201,{success:true,requiresPhoneVerification:true,isNewUser:true,message:'کد تأیید شماره را وارد کنید.'});return true;
++  send(201,{success:true,requiresPhoneVerification:true,isNewUser:true,message:'کد تأیید شماره را وارد کنید.',...previewOtpResponse(previewOtp(number.e164))});return true;
+  }
+  if(body.action==='registration_credentials'){
+   const token=cookie(req,'sp_access'),refresh=cookie(req,'sp_refresh');if(!token || !refresh)throw error(401,'ابتدا شماره موبایل را تأیید کنید.');
+@@ -51,10 +57,10 @@ export async function supabaseAuthAction(req:IncomingMessage,res:ServerResponse,
+   const current=await readPortal(),user=current.users.find(u=>u.authUserId===verified.id);
+   send(200,{success:true,user:safe(user),credentials:{username}});return true;
+  }
+- if(body.action==='otp_request'){if(process.env.SUPABASE_SMS_READY!=='true')throw error(503,'سرویس پیامک هنوز فعال نشده است.');const number=phone(body.phone);const result=await auth.auth.signInWithOtp({phone:number.e164,options:{shouldCreateUser:false}});if(result.error)throw error(400,'ارسال کد انجام نشد؛ شماره و تنظیمات پیامک Supabase Auth را بررسی کنید.');send(200,{success:true,retryAfter:60,message:'اگر حساب فعال وجود داشته باشد، کد تأیید ارسال می‌شود.'});return true;}
++ if(body.action==='otp_request'){const number=phone(body.phone);if(process.env.SUPABASE_SMS_READY!=='true' && !previewOtp(number.e164))throw error(503,'سرویس پیامک هنوز فعال نشده است.');const result=await auth.auth.signInWithOtp({phone:number.e164,options:{shouldCreateUser:false}});if(result.error)throw error(400,'ارسال کد انجام نشد؛ شماره و تنظیمات پیامک Supabase Auth را بررسی کنید.');send(200,{success:true,retryAfter:60,message:'اگر حساب فعال وجود داشته باشد، کد تأیید ارسال می‌شود.',...previewOtpResponse(previewOtp(number.e164))});return true;}
+  let session:Session|null=null;
+- if(body.action==='otp_verify'){if(!/^[0-9۰-۹]{6}$/.test(String(body.code || '')))throw error(400,'کد تأیید شش‌رقمی وارد کنید.');const result=await auth.auth.verifyOtp({phone:phone(body.phone).e164,token:String(body.code || '').replace(/[۰-۹]/g,d=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d))),type:'sms'});if(result.error)throw error(401,'کد واردشده معتبر نیست.');session=result.data.session;}
+- else{const db=await readPortal();const identifier=String(body.identifier || body.username || '').trim().toLowerCase();const profile=db.users.find(user=>user.username?.toLowerCase()===identifier || user.phone===identifier);if(!profile?.authUserId)throw error(401,'ورود معتبر نیست یا انتقال حساب به Supabase Auth باید تکمیل شود.');const result=await auth.auth.signInWithPassword({phone:phone(profile.phone).e164,password:String(body.password || '')});if(result.error)throw error(401,'نام کاربری یا رمز عبور معتبر نیست؛ در صورت نیاز از ورود پیامکی استفاده کنید.');session=result.data.session;}
++ if(body.action==='otp_verify'){if(!/^[0-9]{6}$/.test(normalizeDigits(String(body.code || ''))))throw error(400,'کد تأیید شش‌رقمی وارد کنید.');const result=await auth.auth.verifyOtp({phone:phone(body.phone).e164,token:normalizeDigits(String(body.code || '')),type:'sms'});if(result.error)throw error(401,'کد واردشده معتبر نیست.');session=result.data.session;}
++ else{const db=await readPortal();const identifier=normalizeDigits(String(body.identifier || body.username || '').trim()).toLowerCase();if(!/^(?:09[0-9]{9}|[a-z][a-z0-9_]{3,31})$/.test(identifier) || typeof body.password!=='string' || !body.password.length || body.password.length>128)throw error(400,'موبایل یا نام کاربری و رمز عبور معتبر وارد کنید.');const profile=db.users.find(user=>user.username?.toLowerCase()===identifier || user.phone===identifier);if(!profile?.authUserId)throw error(401,'ورود معتبر نیست یا انتقال حساب به Supabase Auth باید تکمیل شود.');const result=await auth.auth.signInWithPassword({phone:phone(profile.phone).e164,password:String(body.password || '')});if(result.error)throw error(401,'نام کاربری یا رمز عبور معتبر نیست؛ در صورت نیاز از ورود پیامکی استفاده کنید.');session=result.data.session;}
+  if(!session)throw error(401,'نشست ورود ایجاد نشد.');cookies(req,res,session);
+  // Consume only the draft bound to the verified browser and matching verified phone.
+  const draftId=cookie(req,'sp_registration');
+diff --git a/src/components/auth/AccountAccess.tsx b/src/components/auth/AccountAccess.tsx
+index 3740e94..1e69ad1 100644
+--- a/src/components/auth/AccountAccess.tsx
++++ b/src/components/auth/AccountAccess.tsx
+@@ -1,3 +1,4 @@
++import { authRegistrationError, mobileInput, identifierInput, personNameInput } from "../../utils/authValidation";
+ import React, { useState, useEffect } from "react";
+ import { Link, useNavigate } from "react-router-dom";
+ import {
+@@ -32,6 +33,7 @@ export function AccountAccess({
+     [error, setError] = useState("");
+   const [province, setProvince] = useState(""),
+     [city, setCity] = useState("");
++  const [previewCode,setPreviewCode]=useState("");
+   const [requiresVerification,setRequiresVerification]=useState(false);
+   const [details, setDetails] = useState<Partial<RegisterPayload>>({});
+   useEffect(()=>{
+@@ -75,12 +77,14 @@ export function AccountAccess({
+           (c) => c.id === city,
+         )?.name,
+       };
++      const invalid=authRegistrationError(registrationDetails);
++      if(invalid){setError(invalid);return;}
+       setDetails(registrationDetails);
+       setBusy(true);
+       try {
+         const result=await auth.registerUser(registrationDetails as RegisterPayload);
+         if(!result.success){setError(result.message || 'ارسال کد انجام نشد.');return;}
+-        setRequiresVerification(true);setMode('login');setMethod('sms');
++        setPreviewCode(result.previewCode || "");setRequiresVerification(true);setMode('login');setMethod('sms');
+       } finally {setBusy(false);}
+       return;
+     }
+@@ -146,8 +150,8 @@ export function AccountAccess({
+     </label>
+   );
+   return (
+-    <div className="account-access">
+-      <aside className="account-access-story">
++    <div className="account-access" style={{direction:"ltr"}}>
++      <aside className="account-access-story" style={{direction:"rtl"}}>
+         <img src={A.authIndustrialHero} alt="" />
+         <div>
+           <span className="account-symbol">
+@@ -176,7 +180,7 @@ export function AccountAccess({
+           </Link>
+         </div>
+       </aside>
+-      <section className="account-access-form">
++      <section className="account-access-form" style={{direction:"rtl"}}>
+         <div className="account-form-heading">
+           <span className="store-eyebrow">
+             با صنعت پیش، هوشمندانه پیش بروید
+@@ -233,15 +237,20 @@ export function AccountAccess({
+           </div>
+         )}
+         {mode === "login" && method === "sms" ? (
+-          <PhoneLogin initialPhone={requiresVerification?details.mobile:undefined} initialSent={requiresVerification} onSuccess={(user,pending)=>{if(pending){setRequiresVerification(false);setMode('register');setStep(2);}else go(user);}} />
++          <PhoneLogin initialPreviewCode={previewCode} initialPhone={requiresVerification?details.mobile:undefined} initialSent={requiresVerification} onSuccess={(user,pending)=>{if(pending){setRequiresVerification(false);setMode('register');setStep(2);}else go(user);}} />
+         ) : (
+-          <form onSubmit={submit} className="account-fields">
++          <form onSubmit={submit} className="account-fields" onInputCapture={e=>{
++ const el=e.target;if(!(el instanceof HTMLInputElement))return;
++ if(el.name==="mobile")el.value=mobileInput(el.value);
++ else if(["firstName","lastName"].includes(el.name))el.value=personNameInput(el.value);
++ else if(["identifier","username"].includes(el.name))el.value=identifierInput(el.value);
++}}>
+             {mode === "login" ? (
+               <>
+                 <label>
+                   موبایل یا نام کاربری
+                   <input
+-                    name="identifier"
++                    name="identifier" maxLength={32} pattern="(?:09[0-9]{9}|[a-zA-Z][a-zA-Z0-9_]{3,31})"
+                     autoComplete="username"
+                     dir="ltr"
+                     required
+@@ -273,7 +282,7 @@ export function AccountAccess({
+                       <label>
+                         نام
+                         <input
+-                          name="firstName"
++                          name="firstName" minLength={2} maxLength={50}
+                           autoComplete="given-name"
+                           defaultValue={details.firstName}
+                           required
+@@ -282,7 +291,7 @@ export function AccountAccess({
+                       <label>
+                         نام خانوادگی
+                         <input
+-                          name="lastName"
++                          name="lastName" minLength={2} maxLength={50}
+                           autoComplete="family-name"
+                           defaultValue={details.lastName}
+                           required
+@@ -294,7 +303,11 @@ export function AccountAccess({
+                       <input
+                         name="mobile"
+                         type="tel"
+-                        inputMode="tel"
++                        inputMode="numeric"
++                        minLength={11}
++                        maxLength={11}
++                        pattern="09[0-9]{9}"
++                        title="شماره موبایل ۱۱ رقمی با شروع 09"
+                         dir="ltr"
+                         autoComplete="tel"
+                         defaultValue={details.mobile}
+@@ -305,7 +318,7 @@ export function AccountAccess({
+                     <label>
+                       نام شرکت، کارخانه یا فروشگاه
+                       <input
+-                        name="companyName"
++                        name="companyName" minLength={2} maxLength={150}
+                         autoComplete="organization"
+                         defaultValue={details.companyName}
+                         required
+@@ -370,7 +383,7 @@ export function AccountAccess({
+                     <label>
+                       ایمیل <small>اختیاری</small>
+                       <input
+-                        name="email"
++                        name="email" maxLength={254}
+                         type="email"
+                         dir="ltr"
+                         autoComplete="email"
+diff --git a/src/components/auth/PhoneLogin.tsx b/src/components/auth/PhoneLogin.tsx
+index 298ff09..a64fb39 100644
+--- a/src/components/auth/PhoneLogin.tsx
++++ b/src/components/auth/PhoneLogin.tsx
+@@ -1,17 +1,19 @@
++import {mobileInput,normalizeDigits} from "../../utils/authValidation";
+ import React, { useEffect, useState } from "react";
+ import { ArrowLeft, RotateCcw, Smartphone } from "lucide-react";
+ import { portalRequest, hydratePortal } from "../../services/portalRepository";
+ import { Customer } from "../../types";
+ export function PhoneLogin({
+-  onSuccess,initialPhone="",initialSent=false,
++  onSuccess,initialPhone="",initialSent=false,initialPreviewCode="",
+ }: {
+-  initialPhone?:string;initialSent?:boolean;
++  initialPhone?:string;initialSent?:boolean;initialPreviewCode?:string;
+   onSuccess: (user: Customer, requiresCredentials?: boolean) => void;
+ }) {
+   const [phone, setPhone] = useState(initialPhone),
+     [code, setCode] = useState(""),
+     [error, setError] = useState(""),
+     [notice, setNotice] = useState("");
++  const [previewCode,setPreviewCode]=useState(initialPreviewCode);
+   const [sent, setSent] = useState(initialSent),
+     [busy, setBusy] = useState(false),
+     [seconds, setSeconds] = useState(initialSent?60:0);
+@@ -21,6 +23,7 @@ export function PhoneLogin({
+     return () => clearTimeout(timer);
+   }, [seconds]);
+   const request = async () => {
++    if(!/^09[0-9]{9}$/.test(phone)){setError("شماره موبایل باید ۱۱ رقم و با 09 شروع شود.");return;}
+     setBusy(true);
+     setError("");
+     try {
+@@ -28,6 +31,7 @@ export function PhoneLogin({
+       setSent(true);
+       setSeconds(r.retryAfter || 60);
+       setNotice(r.message);
++      setPreviewCode(r.previewCode || "");
+     } catch (e: any) {
+       setError(e.message || "ارسال پیامک انجام نشد.");
+     } finally {
+@@ -56,19 +60,23 @@ export function PhoneLogin({
+         <input
+           type="tel"
+           dir="ltr"
+-          inputMode="tel"
++          inputMode="numeric"
++          minLength={11}
++          maxLength={11}
++          pattern="09[0-9]{9}"
+           autoComplete="tel"
+           required
+           value={phone}
+           disabled={sent}
+-          onChange={(e) => setPhone(e.target.value)}
++          onChange={(e) => setPhone(mobileInput(e.target.value))}
+           placeholder="09123456789"
+         />
+       </label>
+       {sent && (
+         <>
+           <p role="status" className="account-help">
+-            {notice || "کد ارسال‌شده به شماره موبایل خود را وارد کنید."}
++            {previewCode && <strong dir="ltr">{previewCode} — کد آزمایشی</strong>}
++            {previewCode ? "محیط آزمایشی؛ این کد مالکیت واقعی شماره را تأیید نمی‌کند." : notice || "کد ارسال‌شده به شماره موبایل خود را وارد کنید."}
+           </p>
+           <label>
+             کد شش‌رقمی
+@@ -77,11 +85,12 @@ export function PhoneLogin({
+               dir="ltr"
+               inputMode="numeric"
+               autoComplete="one-time-code"
++              pattern="[0-9]{6}"
+               minLength={6}
+               maxLength={6}
+               required
+               value={code}
+-              onChange={(e) => setCode(e.target.value)}
++              onChange={(e) => setCode(normalizeDigits(e.target.value).replace(/[^0-9]/g,"").slice(0,6))}
+               placeholder="------"
+             />
+           </label>
+diff --git a/src/pages/AboutUsPage.tsx b/src/pages/AboutUsPage.tsx
+index 13ae04d..8915eb2 100644
+--- a/src/pages/AboutUsPage.tsx
++++ b/src/pages/AboutUsPage.tsx
+@@ -97,7 +97,7 @@ export const AboutUsPage: React.FC<AboutUsPageProps> = ({ defaultTab = 'intro' }
+       id: 'iso9001',
+       title: 'گواهینامه مدیریت کیفیت ISO 9001:2015',
+       issuer: 'نهاد صدور گواهینامه معتبر TUV / DAS International',
+-      regNo: 'IR-QC-984021',
++      regNo: 'نیازمند تأیید مدارک',
+       validity: 'معتبر تا ۲۰۲۷',
+       description: 'پایش و استقرار سیستم مدیریت کیفیت در فرآیندهای زنجیره تأمین، بسته‌بندی، انبارداری و بازرسی متالوژی قطعات.',
+       icon: ShieldCheck,
+@@ -107,7 +107,7 @@ export const AboutUsPage: React.FC<AboutUsPageProps> = ({ defaultTab = 'intro' }
+       id: 'mimt',
+       title: 'پروانه رسمی بازرگانی و تأمین تجهیزات از وزارت صمت',
+       issuer: 'وزارت صنعت، معدن و تجارت جمهوری اسلامی ایران',
+-      regNo: 'صمت-۱۴۰۱/۷۴۸۹۲',
++      regNo: 'نیازمند تأیید مدارک',
+       validity: 'دارای تمدید دائم و فاکتور رسمی',
+       description: 'مجوز قانونی فروش عمده، تأمین تجهیزات استراتژیک کارخانجات مادر، دارای کد اقتصادی و ارزش افزوده معتبر.',
+       icon: FileCheck2,
+@@ -117,7 +117,7 @@ export const AboutUsPage: React.FC<AboutUsPageProps> = ({ defaultTab = 'intro' }
+       id: 'iso14001',
+       title: 'استاندارد زیست‌محیطی ISO 14001:2015',
+       issuer: 'سیستم‌های مدیریت ایمنی و محیط‌زیست صنعتی',
+-      regNo: 'ENV-2023-8812',
++      regNo: 'نیازمند تأیید مدارک',
+       validity: 'معتبر تا ۲۰۲۶',
+       description: 'تعهد به تأمین قطعات کم‌مصرف انرژی، بهینه‌سازی اصطکاک و انتقال قدرت سبز در خطوط کوره و پرس.',
+       icon: Shield,
+@@ -127,7 +127,7 @@ export const AboutUsPage: React.FC<AboutUsPageProps> = ({ defaultTab = 'intro' }
+       id: 'ce_cert',
+       title: 'گواهی تطابق ایمنی اتحادیه اروپا (CE Mark)',
+       issuer: 'مختص رولرهای نسوز و پولی‌های چدنی برند FORZA',
+-      regNo: 'CE-EU-440918',
++      regNo: 'نیازمند تأیید مدارک',
+       validity: 'استاندارد بین‌المللی تولید',
+       description: 'تطابق کامل آلیاژ ریخته‌گری GG25 و سرامیک‌های دمای بالا با استانداردهای مکانیکی و ایمنی اروپا.',
+       icon: Award,
+@@ -548,19 +548,19 @@ export const AboutUsPage: React.FC<AboutUsPageProps> = ({ defaultTab = 'intro' }
+               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+                 <div className="p-3.5 rounded-xl bg-white/10 border border-white/10 space-y-1">
+                   <span className="text-slate-300">شناسه ملی شرکت:</span>
+-                  <div className="font-mono font-bold text-white text-sm">۱۰۸۶۱۷۲۸۳۹۰</div>
++                  <div className="font-mono font-bold text-white text-sm">پس از تأیید مدیریت</div>
+                 </div>
+                 <div className="p-3.5 rounded-xl bg-white/10 border border-white/10 space-y-1">
+                   <span className="text-slate-300">کد اقتصادی معتبر:</span>
+-                  <div className="font-mono font-bold text-white text-sm">۴۱۱۵۶۸۳۹۲۱۱۸</div>
++                  <div className="font-mono font-bold text-white text-sm">پس از تأیید مدیریت</div>
+                 </div>
+                 <div className="p-3.5 rounded-xl bg-white/10 border border-white/10 space-y-1">
+                   <span className="text-slate-300">شماره ثبت شرکت‌ها:</span>
+-                  <div className="font-mono font-bold text-white text-sm">۴۲۹۰۸</div>
++                  <div className="font-mono font-bold text-white text-sm">پس از تأیید مدیریت</div>
+                 </div>
+                 <div className="p-3.5 rounded-xl bg-white/10 border border-white/10 space-y-1">
+                   <span className="text-slate-300">سیستم ارزش افزوده:</span>
+-                  <div className="font-sans font-bold text-emerald-400 text-sm">عضویت دائم فعال</div>
++                  <div className="font-sans font-bold text-emerald-400 text-sm">نیازمند تأیید مدارک</div>
+                 </div>
+               </div>
+             </div>
+diff --git a/src/services/authService.ts b/src/services/authService.ts
+index 96fb738..14f6c79 100644
+--- a/src/services/authService.ts
++++ b/src/services/authService.ts
+@@ -6,7 +6,7 @@ export class AuthService {
+   static async register(payload: RegisterPayload): Promise<AuthResponse> {
+     try {
+       const data = await portalRequest({ action: "register", payload });
+-      await hydratePortal();
++      if (!data.requiresPhoneVerification) await hydratePortal();
+       return data;
+     } catch (e: any) {
+       return { success: false, message: e.message };
+diff --git a/src/types.ts b/src/types.ts
+index e199432..6d3f669 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -192,6 +192,7 @@ export interface AuthCredentials {
+ }
+ 
+ export interface AuthResponse {
++  previewCode?: string;
+   requiresPhoneVerification?:boolean;
+   success: boolean;
+   message?: string;
+diff --git a/src/utils/authValidation.ts b/src/utils/authValidation.ts
+new file mode 100644
+index 0000000..24729a3
+--- /dev/null
++++ b/src/utils/authValidation.ts
+@@ -0,0 +1,18 @@
++import { IRAN_PROVINCES, ACTIVITY_FIELDS } from "../data/iranLocations";
++export const normalizeDigits=(value:string)=>value.replace(/[۰-۹]/g,d=>String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g,d=>String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
++export const mobileInput=(value:string)=>normalizeDigits(value).replace(/[^0-9]/g,"").slice(0,11);
++export const identifierInput=(value:string)=>normalizeDigits(value).replace(/[^a-zA-Z0-9_]/g,"").slice(0,32);
++export const personNameInput=(value:string)=>value.replace(/[^\p{L}\p{M}\s\u200c'-]/gu,"").slice(0,50);
++export function authRegistrationError(p:Record<string,unknown>):string|null {
++ if(typeof p.mobile!=="string" || !/^09[0-9]{9}$/.test(normalizeDigits(p.mobile)))return "شماره موبایل باید دقیقاً ۱۱ رقم و با 09 شروع شود.";
++ for(const field of ["firstName","lastName"]) {
++  const value=typeof p[field]==="string"?(p[field] as string).trim():"";
++  if(value.length<2 || value.length>50 || !/^[\p{L}\p{M}\s\u200c'-]+$/u.test(value) || !/\p{L}/u.test(value))return "نام و نام خانوادگی باید ۲ تا ۵۰ نویسه و فقط شامل حروف باشند.";
++ }
++ if(typeof p.companyName!=="string" || p.companyName.trim().length<2 || p.companyName.length>150 || /[\u0000-\u001f\u007f]/.test(p.companyName))return "نام شرکت یا فروشگاه باید ۲ تا ۱۵۰ نویسه باشد.";
++ const province=IRAN_PROVINCES.find(item=>item.id===p.provinceId);
++ if(!province || !province.cities.some(item=>item.id===p.cityId))return "استان و شهر معتبر و مرتبط انتخاب کنید.";
++ if(typeof p.activityField!=="string" || !ACTIVITY_FIELDS.some(value=>value===p.activityField))return "زمینه فعالیت را از فهرست انتخاب کنید.";
++ if(p.email && (typeof p.email!=="string" || p.email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email)))return "ایمیل معتبر وارد کنید یا فیلد اختیاری را خالی بگذارید.";
++ return null;
++}
+diff --git a/src/utils/recognitionPolicy.ts b/src/utils/recognitionPolicy.ts
+index 94a39ea..1423b64 100644
+--- a/src/utils/recognitionPolicy.ts
++++ b/src/utils/recognitionPolicy.ts
+@@ -1,7 +1,7 @@
+ import type { Product } from '../types';
+ 
+ export function recognitionWorkerUrl(env: Record<string, string | undefined>): string {
+-  const value = (env.PART_RECOGNITION_WORKER_URL ?? 'https://atlas-aishenasaei.javanwebio.workers.dev').trim();
++  const value = (env.PART_RECOGNITION_WORKER_URL ?? '').trim();
+   if (!value) return '';
+   const url = new URL(value);
+   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !['','/'].includes(url.pathname))
+diff --git a/tests/authValidation.test.ts b/tests/authValidation.test.ts
+new file mode 100644
+index 0000000..8129972
+--- /dev/null
++++ b/tests/authValidation.test.ts
+@@ -0,0 +1,9 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import {authRegistrationError,mobileInput,normalizeDigits,personNameInput,identifierInput} from "../src/utils/authValidation";
++import {IRAN_PROVINCES,ACTIVITY_FIELDS} from "../src/data/iranLocations";
++const p={firstName:"حسین",lastName:"طلبه",mobile:"09123456789",companyName:"صنعت پیش",provinceId:IRAN_PROVINCES[0].id,cityId:IRAN_PROVINCES[0].cities[0].id,activityField:ACTIVITY_FIELDS[0],email:""};
++test("valid registration and Persian/Arabic digits",()=>{assert.equal(authRegistrationError(p),null);assert.equal(authRegistrationError({...p,mobile:"۰۹۱۲۳۴۵۶۷۸۹"}),null);assert.equal(normalizeDigits("٠٩١٢٣٤٥٦٧٨٩"),p.mobile);assert.equal(mobileInput("۰۹۱۲a۳۴۵۶۷۸۹!"),p.mobile);});
++test("server rejects malformed and oversized mobile numbers",()=>{for(const mobile of ["0912345678","091234567890","08123456789","09abc456789",null])assert.ok(authRegistrationError({...p,mobile}));});
++test("names, company and optional email are validated",()=>{for(const fields of [{firstName:"123"},{lastName:"<script>"},{firstName:"a".repeat(51)},{companyName:"x"},{email:"bad@"}])assert.ok(authRegistrationError({...p,...fields}));assert.equal(personNameInput("علی123"),"علی");assert.equal(identifierInput("hossein@۱"),"hossein1");});
++test("city must belong to selected province and activity must be known",()=>{assert.ok(authRegistrationError({...p,cityId:IRAN_PROVINCES[1].cities[0].id}));assert.ok(authRegistrationError({...p,activityField:"unlisted"}));});
+diff --git a/tests/database/auth-flow.test.ts b/tests/database/auth-flow.test.ts
+index e8db6f2..e1e38a8 100644
+--- a/tests/database/auth-flow.test.ts
++++ b/tests/database/auth-flow.test.ts
+@@ -1,3 +1,4 @@
++import {IRAN_PROVINCES,ACTIVITY_FIELDS} from '../../src/data/iranLocations';
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import type {IncomingMessage,ServerResponse} from 'node:http';
+@@ -9,7 +10,8 @@ test('registration fails closed without SMS; credentials require a verified serv
+  try {
+   process.env.SUPABASE_URL='https://example.supabase.co';process.env.SUPABASE_PUBLISHABLE_KEY='test-publishable';process.env.SUPABASE_SMS_READY='false';
+   for(const [body,status,pattern] of [
+-   [{action:'register',payload:{mobile:'09120000001',password:'must-never-be-stored'}},503,/پیامک/],
++   [{action:'register',payload:{mobile:'abc'}},400,/۱۱/],
++   [{action:'register',payload:{firstName:'حسین',lastName:'طلبه',companyName:'صنعت پیش',provinceId:IRAN_PROVINCES[0].id,cityId:IRAN_PROVINCES[0].cities[0].id,activityField:ACTIVITY_FIELDS[0],mobile:'09120000001',password:'must-never-be-stored'}},503,/پیامک/],
+    [{action:'registration_credentials',username:'attacker',password:'not-authorized'},401,/تأیید/],
+    [{action:'otp_verify',phone:'09120000001',code:'123'},400,/شش/],
+   ] as const){
+diff --git a/tests/preview-otp.test.ts b/tests/preview-otp.test.ts
+new file mode 100644
+index 0000000..68b1222
+--- /dev/null
++++ b/tests/preview-otp.test.ts
+@@ -0,0 +1,13 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {previewOtp,previewOtpResponse} from '../server/db/previewOtp';
++const env={APP_ENV:'preview',DATABASE_ENV:'development',PREVIEW_OTP_VALID_UNTIL:new Date(Date.now()+60000).toISOString(),SUPABASE_PREVIEW_TEST_OTPS:'989120000001:123456'};
++test('test code is restricted to explicitly mapped phones and a live preview environment',()=>{
++ assert.equal(previewOtp('+989120000001',env),'123456');
++ assert.equal(previewOtp('+989120000002',env),undefined);
++ assert.equal(previewOtp('+989120000001',{...env,APP_ENV:'production'}),undefined);
++ assert.equal(previewOtp('+989120000001',{...env,DATABASE_ENV:'production'}),undefined);
++ assert.equal(previewOtp('+989120000001',{...env,PREVIEW_OTP_VALID_UNTIL:'2000-01-01'}),undefined);
++ assert.equal(previewOtp('+989120000001',{...env,PREVIEW_OTP_VALID_UNTIL:''}),undefined);
++ assert.deepEqual(previewOtpResponse(undefined),{});
++});
+diff --git a/tests/recognition-policy.test.ts b/tests/recognition-policy.test.ts
+index 2bbe28a..e6884b8 100644
+--- a/tests/recognition-policy.test.ts
++++ b/tests/recognition-policy.test.ts
+@@ -7,8 +7,9 @@ import { getManagedCatalogProducts } from '../src/data/mockGenerator';
+ import inventorySource from '../src/data/catalogueSource.json';
+ import type { Product } from '../src/types';
+ 
+-test('worker is default, explicit empty disables it, and direct key aliases remain server-side',()=>{
+- assert.equal(recognitionWorkerUrl({}),'https://atlas-aishenasaei.javanwebio.workers.dev');
++test('worker origin and provider keys come exclusively from environment',()=>{
++ assert.equal(recognitionWorkerUrl({}),'');
++ assert.equal(recognitionWorkerUrl({PART_RECOGNITION_WORKER_URL:'https://example.com'}),'https://example.com');
+  assert.equal(recognitionWorkerUrl({PART_RECOGNITION_WORKER_URL:'  '}),'');
+  assert.throws(()=>recognitionWorkerUrl({PART_RECOGNITION_WORKER_URL:'http://example.com'}));
+  assert.throws(()=>recognitionWorkerUrl({PART_RECOGNITION_WORKER_URL:'https://example.com/path'}));
+@@ -58,7 +59,7 @@ test('worker multimodal transport sends images and prompt, never direct keys or
+ });
+ test('worker malformed reply and HTTP failure are not successful recognition',async()=>{
+  for (const response of [new Response('bad',{status:502}),new Response('{"success":true}',{status:200})])
+-  await assert.rejects(()=>workerVision([],{env:{},fetch:(async()=>response) as typeof fetch}));
++  await assert.rejects(()=>workerVision([],{env:{PART_RECOGNITION_WORKER_URL:'https://atlas-aishenasaei.javanwebio.workers.dev'},fetch:(async()=>response) as typeof fetch}));
+ });
+ 
+ test('only an explicitly reviewed dedicated photo can support image identity',()=>{
+@@ -75,14 +76,14 @@ test('legacy Worker wrapping is unwrapped for one image and rejected for multi-i
+  const data={recognition:{detected_part_type:'فنر'},choices:[{message:{content:'{"recognition":{"detected_part_type":"فنر"}}'}}]};
+  const fetchMock=(async()=>new Response(JSON.stringify(data),{status:200})) as typeof fetch;
+  const part={inlineData:{mimeType:'image/png',data:'YQ=='}};
+- const result=await workerVision([{role:'user',parts:[part]}],{env:{},fetch:fetchMock});
++ const result=await workerVision([{role:'user',parts:[part]}],{env:{PART_RECOGNITION_WORKER_URL:'https://atlas-aishenasaei.javanwebio.workers.dev'},fetch:fetchMock});
+  assert.equal(JSON.parse(result.text).detected_part_type,'فنر');
+- await assert.rejects(()=>workerVision([{role:'user',parts:[part,part]}],{env:{},fetch:fetchMock}),/upgrade required/);
++ await assert.rejects(()=>workerVision([{role:'user',parts:[part,part]}],{env:{PART_RECOGNITION_WORKER_URL:'https://atlas-aishenasaei.javanwebio.workers.dev'},fetch:fetchMock}),/upgrade required/);
+ });
+ 
+ test('the supplied Worker host never receives a source-default credential',async()=>{
+  let headers:any;
+- await workerVision([{role:'user',parts:[{text:'test'}]}],{env:{},fetch:(async(_url,options)=>{
++ await workerVision([{role:'user',parts:[{text:'test'}]}],{env:{PART_RECOGNITION_WORKER_URL:'https://atlas-aishenasaei.javanwebio.workers.dev'},fetch:(async(_url,options)=>{
+   headers=options?.headers;return new Response('{"choices":[{"message":{"content":"{}"}}]}',{status:200});
+  }) as typeof fetch});
+  assert.equal(headers.Authorization,undefined);
+@@ -98,7 +99,7 @@ test('Workers reject requests without a configured access secret, even with a pr
+ 
+ test('Worker authentication, missing provider key and inaccessible images have actionable safe errors',async()=>{
+  for(const [status,type,expected] of [[401,'unauthorized','APP_WORKER_TOKEN'],[503,'ai_not_configured','GEMINI_API_KEY'],[400,'invalid_image','HTTPS']]){
+-  await assert.rejects(()=>workerVision([],{env:{},fetch:async()=>new Response(JSON.stringify({error:{type,message:'provider-private-detail'}}),{status:Number(status)})}),error=>{
++  await assert.rejects(()=>workerVision([],{env:{PART_RECOGNITION_WORKER_URL:'https://atlas-aishenasaei.javanwebio.workers.dev'},fetch:async()=>new Response(JSON.stringify({error:{type,message:'provider-private-detail'}}),{status:Number(status)})}),error=>{
+    assert.ok(error instanceof Error);assert.ok(error.message.includes(String(expected)));assert.ok(!error.message.includes('provider-private-detail'));return true;
+   });
+  }
